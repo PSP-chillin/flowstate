@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Water Leak Detection Dashboard</title>
+    <link rel="stylesheet" href="assets/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.5.0/dist/umd/supabase.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.2/mqttws31.js"></script>
+</head>
+<body>
+    <!-- Animated Water Background -->
+    <div class="water-background">
+        <svg class="waves" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+        viewBox="0 24 150 28" preserveAspectRatio="none" shape-rendering="auto">
+            <defs>
+                <path id="gentle-wave" d="M-160 44c30 0 58-18 88-18s 58 18 88 18 58-18 88-18 58 18 88 18 v44h-352z" />
+            </defs>
+            <g class="parallax">
+                <use xlink:href="#gentle-wave" x="48" y="0" fill="rgba(30, 136, 229, 0.1)" />
+                <use xlink:href="#gentle-wave" x="48" y="3" fill="rgba(30, 136, 229, 0.2)" />
+                <use xlink:href="#gentle-wave" x="48" y="5" fill="rgba(30, 136, 229, 0.3)" />
+                <use xlink:href="#gentle-wave" x="48" y="7" fill="rgba(30, 136, 229, 0.4)" />
+            </g>
+        </svg>
+    </div>
+
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1>💧 Water Leak Detection System</h1>
+                <div class="header-status">
+                    <button id="themeToggle" class="theme-toggle">🌙 Dark</button>
+                    <div class="last-update" id="lastUpdate">Last Update: --</div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Dashboard Grid -->
+        <div class="dashboard-grid">
+            
+            <!-- Top Row: Tank & Flow Rates -->
+            <div class="monitoring-row">
+                <!-- Tank Level Section -->
+                <section class="card tank-section">
+                    <h2>🏢 Tank Level</h2>
+                    <div class="tank-container">
+                        <div class="water-tank">
+                            <div class="liquid">
+                                <svg class="water" viewBox="0 0 200 100">
+                                    <defs>
+                                        <linearGradient id="waterGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                                            <stop offset="0" style="stop-color:#29ABE2"/>
+                                            <stop offset="0.1643" style="stop-color:#28A6E3"/>
+                                            <stop offset="0.3574" style="stop-color:#2496E6"/>
+                                            <stop offset="0.5431" style="stop-color:#1E7DEA"/>
+                                            <stop offset="0.7168" style="stop-color:#1559F0"/>
+                                            <stop offset="0.874" style="stop-color:#0B2CF7"/>
+                                            <stop offset="1" style="stop-color:#0000FF"/>
+                                        </linearGradient>
+                                    </defs>
+                                    <path fill="url(#waterGradient)" d="M 0,0 v 100 h 200 v -100 c -10,0 -15,5 -25,5 c -10,0 -15,-5 -25,-5 c -10,0 -15,5 -25,5 c -10,0 -15,-5 -25,-5 c -10,0 -15,5 -25,5 c -10,0 -15,-5 -25,-5 c -10,0 -15,5 -25,5 c -10,0 -15,-5 -25,-5"/>
+                                </svg>
+                            </div>
+                            <div class="indicator" data-value="75"></div>
+                            <div class="indicator" data-value="50"></div>
+                            <div class="indicator" data-value="25"></div>
+                            <div class="label" id="tankLabel">70%</div>
+                        </div>
+                        <div class="tank-info">
+                            <div class="tank-stat">
+                                <span class="label">Level:</span>
+                                <span class="value" id="tankLevel">70 cm</span>
+                            </div>
+                            <div class="tank-stat">
+                                <span class="label">Capacity:</span>
+                                <span class="value">100.0 cm</span>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Flow Rates Section -->
+                <section class="card flow-section">
+                    <h2>⚡ Flow Rates</h2>
+                    <div class="flow-grid">
+                        <div class="flow-item">
+                            <div class="flow-icon">🔵</div>
+                            <div class="flow-label">Sensor 1<br><small>Tank Outlet</small></div>
+                            <div class="flow-value" id="flow1">0.00 L/min</div>
+                        </div>
+                        <div class="flow-item">
+                            <div class="flow-icon">🟢</div>
+                            <div class="flow-label">Sensor 2<br><small>Output Tap</small></div>
+                            <div class="flow-value" id="flow2">0.00 L/min</div>
+                        </div>
+                    </div>
+                    <div class="flow-comparison">
+                        <div class="comparison-bar">
+                            <div class="bar-item">
+                                <label>Flow 1</label>
+                                <div class="progress-bar">
+                                    <div class="progress-fill" id="progressFlow1" style="width: 0%"></div>
+                                </div>
+                            </div>
+                            <div class="bar-item">
+                                <label>Flow 2</label>
+                                <div class="progress-bar">
+                                    <div class="progress-fill" id="progressFlow2" style="width: 0%"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Bottom Row: Leak Detection & Controls -->
+            <div class="bottom-row">
+                <!-- Leak Detection Section -->
+                <section class="card leak-section">
+                    <h2>🚨 Leak Detection</h2>
+                    <div class="leak-display">
+                        <div class="leak-percentage">
+                            <div class="percentage-circle" id="lossPercentageCircle">
+                                <svg viewBox="0 0 120 120">
+                                    <circle cx="60" cy="60" r="55" class="circle-bg"/>
+                                    <circle cx="60" cy="60" r="55" class="circle-progress" id="circleProgress"/>
+                                </svg>
+                                <div class="percentage-text">
+                                    <span id="lossPercentage">0</span>%
+                                </div>
+                            </div>
+                        </div>
+                        <div class="leak-status">
+                            <div class="status-item">
+                                <span class="label">Status:</span>
+                                <span class="badge normal" id="leakStatus">Normal</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="label">Loss Category:</span>
+                                <div class="categories">
+                                    <div class="category normal-cat">
+                                        <span class="range">&lt;5%</span>
+                                        <span class="text">Normal</span>
+                                    </div>
+                                    <div class="category warning-cat">
+                                        <span class="range">5-15%</span>
+                                        <span class="text">Warning</span>
+                                    </div>
+                                    <div class="category critical-cat">
+                                        <span class="range">&gt;15%</span>
+                                        <span class="text">Critical</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- System Controls Section -->
+                <section class="card controls-section">
+                    <h2>⚙️ System Controls</h2>
+                    <div class="controls-grid">
+                        <div class="control-item">
+                            <h3>Solenoid Valve</h3>
+                            <div class="valve-status">
+                                <span class="valve-indicator" id="valveIndicator">●</span>
+                                <span class="valve-state" id="valveState">CLOSED</span>
+                            </div>
+                            <div class="button-group">
+                                <button class="btn btn-open" onclick="openValve()">Open</button>
+                                <button class="btn btn-close" onclick="closeValve()">Close</button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Daily Statistics -->
+                <section class="card statistics-section">
+                    <h2>📊 Daily Statistics</h2>
+                    <div class="stats-content">
+                        <div class="stat-item">
+                            <span class="stat-label">Total Consumption</span>
+                            <span class="stat-value" id="dailyTotal">0.00 L</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Est. Loss</span>
+                            <span class="stat-value" id="estimatedLoss">0.00 L</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Cost (Per L: $0.05)</span>
+                            <span class="stat-value" id="estimatedCost">$0.00</span>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Alerts Section -->
+                <section class="card alerts-section">
+                    <h2>🔔 Recent Alerts</h2>
+                    <div class="alerts-container" id="alertsContainer">
+                        <div class="alert-item" style="color: #666;">
+                            No alerts yet
+                        </div>
+                    </div>
+                </section>
+
+            </div>
+
+        </div>
+
+        <!-- Analytics Section -->
+        <section class="card analytics-section">
+            <h2>📊 Analytics & Trends</h2>
+            <div class="analytics-grid">
+                <div class="chart-container">
+                    <h3>Flow Rate Trend (Last 1 Hour)</h3>
+                    <canvas id="flowChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h3>Accumulated Volume</h3>
+                    <canvas id="volumeChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h3>Hourly Usage Pattern</h3>
+                    <canvas id="hourlyChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h3>Loss Percentage Trend</h3>
+                    <canvas id="lossChart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- Data Export Section -->
+        <section class="card export-section">
+            <h2>💾 Export Data</h2>
+            <div class="export-container">
+                <div class="export-info">
+                    <p>Download your monitoring data in your preferred format</p>
+                    <div class="export-stats">
+                        <span class="stat-item">📈 <strong id="exportRecordCount">0</strong> Records</span>
+                        <span class="stat-item">⚠️ <strong id="exportAlertCount">0</strong> Alerts</span>
+                    </div>
+                </div>
+                <div class="export-buttons">
+                    <button class="export-btn csv-btn" onclick="exportData('csv')">📥 Export as CSV</button>
+                    <button class="export-btn json-btn" onclick="exportData('json')">📥 Export as JSON</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Configuration Section -->
+        <section class="card configuration-section">
+            <h2>⚙️ Configuration</h2>
+            <div class="config-grid">
+                <div class="config-item">
+                    <label class="config-label">Supabase URL</label>
+                    <input type="text" id="supabaseUrl" class="config-input" placeholder="https://your-project.supabase.co">
+                </div>
+                <div class="config-item">
+                    <label class="config-label">API Key</label>
+                    <input type="password" id="supabaseKey" class="config-input" placeholder="Your Supabase API Key">
+                </div>
+                <div class="config-item">
+                    <label class="config-label">Normal Threshold (%)</label>
+                    <input type="number" id="normalThreshold" class="config-input" value="5" min="0" max="100" step="0.1">
+                </div>
+                <div class="config-item">
+                    <label class="config-label">Warning Threshold (%)</label>
+                    <input type="number" id="warningThreshold" class="config-input" value="15" min="0" max="100" step="0.1">
+                </div>
+            </div>
+            <button class="btn btn-save-config" onclick="saveConfiguration()" style="margin-top: 16px;">💾 Save Configuration</button>
+            <p style="margin-top: 12px; font-size: 0.9em; color: var(--text-secondary);">ℹ️ Configuration is saved locally in your browser</p>
+        </section>
+
+    </div>
+
+    <footer class="footer">
+        <p>&copy; 2026 Smart Water Monitoring System | Real-time Leak Detection & Analytics</p>
+    </footer>
+
+    <script src="assets/script.js"></script>
+</body>
+</html>
