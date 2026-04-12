@@ -38,6 +38,7 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <Arduino.h>
 #include <Wire.h>
 #include <RTClib.h>
 #include <time.h>
