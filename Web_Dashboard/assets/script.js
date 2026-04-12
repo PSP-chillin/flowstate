@@ -13,6 +13,11 @@ const CONFIG = {
     maxReadingsFetch: 1440
 };
 
+const API_ADAPTER_CONFIG = {
+    mode: (window.__ENV__?.API_ADAPTER_MODE || 'local').toLowerCase(),
+    baseUrl: window.__ENV__?.API_BASE_URL || localStorage.getItem('apiBaseUrl') || 'http://localhost:8000'
+};
+
 
 
 let supabaseClient = null;
@@ -20,6 +25,12 @@ let isConfigured = false;
 let readingsSubscription = null;
 let alertsSubscription = null;
 let isDarkMode = false;
+let latestReadingSnapshot = null;
+let localAdapterState = {
+    alerts: [],
+    simulations: new Map(),
+    lastDetectKey: null
+};
 let alertFilterSeverity = 'all';
 let alertSearchTerm = '';
 let alertAckFilter = 'open';
@@ -28,6 +39,12 @@ let judgesDemoOnePass = localStorage.getItem('judgesDemoOnePass') === 'true';
 let judgesDemoTimer = null;
 let judgesDemoActive = false;
 let judgesDemoStepIndex = 0;
+let adapterHealthTimer = null;
+let adapterHealthState = {
+    status: 'checking',
+    label: 'Checking...',
+    latencyMs: null
+};
 const chartTimeframes = {
     flow: '1h',
     volume: '1h',
@@ -61,6 +78,273 @@ const JUDGES_DEMO_STEPS = [
     { selector: '#demoUxCard', label: 'UI/UX' }
 ];
 
+const localApiAdapter = {
+    async detect(request) {
+        const reading = Array.isArray(request?.readings) ? request.readings[request.readings.length - 1] : null;
+        if (!reading) {
+            return { status: 'error', error_message: 'No readings provided' };
+        }
+
+        const normalizedReading = {
+            timestamp: reading.timestamp || new Date().toISOString(),
+            flow_rate_1: Number(reading.flow_rate_1 ?? reading.flow_rate ?? 0),
+            flow_rate_2: Number(reading.flow_rate_2 ?? Math.max(0, Number(reading.flow_rate ?? 0) - Number(reading.leak_rate ?? 0))),
+            percentage_loss: Number(reading.percentage_loss ?? 0),
+            daily_total_liters: Number(reading.daily_total_liters ?? 0),
+            humidity: Number(reading.humidity ?? 0)
+        };
+
+        const risk = computePriorityProfile(normalizedReading);
+        const isAlertWorthy = risk.priorityScore >= 25 || risk.leakRateLpm > 0.2;
+        if (!isAlertWorthy) {
+            return { status: 'success', data: { alerts_created: 0, alerts: [] } };
+        }
+
+        const alert = {
+            id: `loc-${Date.now()}`,
+            alert_id: `loc-${Date.now()}`,
+            timestamp: normalizedReading.timestamp,
+            severity: risk.priorityLevel.toLowerCase(),
+            priority_level: risk.priorityLevel,
+            priority_score: risk.priorityScore,
+            failure_probability: Number(risk.failureProbability.toFixed(3)),
+            immediate_action_required: risk.immediateAction,
+            alert_type: `${risk.priorityLevel} Leak Risk`,
+            message: risk.narrative,
+            leak_rate: Number(risk.leakRateLpm.toFixed(3)),
+            source: 'local-adapter'
+        };
+
+        return { status: 'success', data: { alerts_created: 1, alerts: [alert] } };
+    },
+
+    async whatif(payload) {
+        const leakRateLpm = Math.max(0, Number(payload?.leak_rate || 0));
+        const horizonDays = Math.max(1, Math.min(365, Number(payload?.time_horizon_days || 30)));
+        const repairCost = Math.max(1, Number(payload?.repair_cost || 1));
+
+        const ignoreLoss = leakRateLpm * 60 * 24 * horizonDays;
+        const ignoreCost = (ignoreLoss * CONFIG.costPerLiter) + ((ignoreLoss / 90000) * 120);
+        const preventedLoss = ignoreLoss * 0.92;
+        const savings = ignoreCost - repairCost;
+        const recommended = savings > 0 ? 'Repair immediately' : 'Monitor and schedule maintenance';
+        const simulationId = `sim-${Date.now()}`;
+
+        const result = {
+            simulation_id: simulationId,
+            alert_id: payload?.alert_id || 'esp32-live',
+            ignore_scenario: {
+                total_water_loss_liters: Number(ignoreLoss.toFixed(2)),
+                financial_cost_usd: Number(ignoreCost.toFixed(2)),
+                infrastructure_damage_score: Number(Math.min(10, (ignoreLoss / 90000) + 1.2).toFixed(2))
+            },
+            repair_scenario: {
+                repair_cost_usd: Number(repairCost.toFixed(2)),
+                water_loss_prevented_liters: Number(preventedLoss.toFixed(2))
+            },
+            savings_usd: Number(savings.toFixed(2)),
+            recommended_action: recommended
+        };
+
+        localAdapterState.simulations.set(simulationId, result);
+        return { status: 'success', data: result };
+    },
+
+    async explain(payload) {
+        const risk = computePriorityProfile(payload?.reading || latestReadingSnapshot || {});
+        const simulation = payload?.simulation_result || localAdapterState.simulations.get(payload?.simulation_id);
+        const savings = Number(simulation?.savings_usd || 0);
+        const repairCost = Number(simulation?.repair_scenario?.repair_cost_usd || payload?.repair_cost || risk.inferredRepairCost || 0);
+
+        const urgency = risk.immediateAction
+            ? `Urgent: priority ${risk.priorityScore}/100 and ${(risk.failureProbability * 100).toFixed(1)}% failure probability require immediate repair.`
+            : `Moderate risk: maintain close monitoring while planning cost-optimized intervention.`;
+
+        const recommendation = {
+            recommended_action: savings > 0 || risk.immediateAction ? 'Repair immediately' : 'Monitor and schedule maintenance',
+            savings_usd: Number(savings.toFixed(2)),
+            repair_cost_usd: Number(repairCost.toFixed(2)),
+            urgency_rationale: urgency,
+            ai_text: `${urgency} Projected net savings: $${Math.max(0, savings).toFixed(2)}.`
+        };
+
+        return { status: 'success', data: recommendation };
+    }
+};
+
+function normalizeApiAlert(alert) {
+    const priority = String(alert?.priority_level || '').toLowerCase();
+    const severity = alert?.severity || (
+        priority === 'critical' ? 'critical' :
+        priority === 'high' ? 'high' :
+        priority === 'medium' ? 'warning' :
+        'warning'
+    );
+
+    return {
+        ...alert,
+        alert_id: alert?.alert_id || alert?.id || `api-${Date.now()}`,
+        timestamp: alert?.timestamp || new Date().toISOString(),
+        severity,
+        alert_type: alert?.alert_type || `${(alert?.priority_level || 'Alert')} Alert`,
+        message: alert?.message || alert?.urgency_rationale || 'No message provided'
+    };
+}
+
+async function apiRequest(path, payload) {
+    const base = API_ADAPTER_CONFIG.baseUrl.replace(/\/$/, '');
+    const response = await fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+
+    let parsed = null;
+    try {
+        parsed = await response.json();
+    } catch (_) {
+        parsed = null;
+    }
+
+    if (!response.ok) {
+        const message = parsed?.error_message || parsed?.detail || `HTTP ${response.status}`;
+        return { status: 'error', error_message: message };
+    }
+
+    if (parsed && typeof parsed === 'object' && 'status' in parsed) {
+        return parsed;
+    }
+
+    return { status: 'success', data: parsed };
+}
+
+const remoteApiAdapter = {
+    async detect(request) {
+        const response = await apiRequest('/detect', request);
+        if (response?.status !== 'success') {
+            return response;
+        }
+
+        const alerts = Array.isArray(response?.data?.alerts)
+            ? response.data.alerts.map(normalizeApiAlert)
+            : [];
+
+        return {
+            status: 'success',
+            data: {
+                alerts_created: Number(response?.data?.alerts_created || alerts.length),
+                alerts
+            }
+        };
+    },
+
+    async whatif(payload) {
+        return apiRequest('/whatif', payload);
+    },
+
+    async explain(payload) {
+        return apiRequest('/explain', payload);
+    }
+};
+
+function getActiveApiAdapter() {
+    return API_ADAPTER_CONFIG.mode === 'remote' ? remoteApiAdapter : localApiAdapter;
+}
+
+async function pingAdapterHealth() {
+    if (API_ADAPTER_CONFIG.mode !== 'remote') {
+        return {
+            status: 'online',
+            label: 'Local simulator',
+            latencyMs: 0
+        };
+    }
+
+    const base = API_ADAPTER_CONFIG.baseUrl.replace(/\/$/, '');
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 3000);
+    const startedAt = performance.now();
+
+    try {
+        const response = await fetch(`${base}/health`, {
+            method: 'GET',
+            cache: 'no-store',
+            signal: controller.signal
+        });
+        window.clearTimeout(timeoutId);
+
+        const latency = Math.max(1, Math.round(performance.now() - startedAt));
+        if (!response.ok) {
+            return {
+                status: 'offline',
+                label: `HTTP ${response.status}`,
+                latencyMs: latency
+            };
+        }
+
+        return {
+            status: 'online',
+            label: 'Healthy',
+            latencyMs: latency
+        };
+    } catch (_) {
+        window.clearTimeout(timeoutId);
+        return {
+            status: 'offline',
+            label: 'Unreachable',
+            latencyMs: null
+        };
+    }
+}
+
+function renderAdapterStatusBadge() {
+    const modeEl = document.getElementById('adapterModeLabel');
+    const dotEl = document.getElementById('adapterHealthDot');
+    const healthEl = document.getElementById('adapterHealthLabel');
+    const urlEl = document.getElementById('adapterUrlLabel');
+    if (!modeEl || !dotEl || !healthEl || !urlEl) return;
+
+    modeEl.textContent = API_ADAPTER_CONFIG.mode === 'remote' ? 'REMOTE' : 'LOCAL';
+    urlEl.textContent = API_ADAPTER_CONFIG.mode === 'remote'
+        ? API_ADAPTER_CONFIG.baseUrl
+        : 'local://browser';
+
+    dotEl.classList.remove('adapter-health-online', 'adapter-health-offline', 'adapter-health-checking');
+    dotEl.classList.add(
+        adapterHealthState.status === 'online'
+            ? 'adapter-health-online'
+            : adapterHealthState.status === 'offline'
+                ? 'adapter-health-offline'
+                : 'adapter-health-checking'
+    );
+
+    const suffix = API_ADAPTER_CONFIG.mode === 'remote' && adapterHealthState.latencyMs !== null
+        ? ` (${adapterHealthState.latencyMs}ms)`
+        : '';
+    healthEl.textContent = `${adapterHealthState.label}${suffix}`;
+}
+
+async function refreshAdapterHealth() {
+    adapterHealthState = {
+        status: 'checking',
+        label: 'Checking...',
+        latencyMs: null
+    };
+    renderAdapterStatusBadge();
+    adapterHealthState = await pingAdapterHealth();
+    renderAdapterStatusBadge();
+}
+
+function setupAdapterStatusBadge() {
+    renderAdapterStatusBadge();
+    refreshAdapterHealth();
+
+    if (adapterHealthTimer) {
+        window.clearInterval(adapterHealthTimer);
+    }
+    adapterHealthTimer = window.setInterval(refreshAdapterHealth, 12000);
+}
+
 // ============== INITIALIZATION ==============
 document.addEventListener('DOMContentLoaded', function() {
     console.log('Dashboard initialized');
@@ -71,6 +355,8 @@ document.addEventListener('DOMContentLoaded', function() {
     setupTimeframeSparklineUI();
     loadTheme();
     setupThemeToggle();
+    setupAdapterStatusBadge();
+    setupIntelligenceStudio();
     setupJudgesDemoMode();
     setupMobileCriticalMode();
     loadConfiguration();
@@ -850,6 +1136,8 @@ async function fetchLatestData() {
 
 // ============== DASHBOARD UPDATES ==============
 function updateDashboard(latestReading) {
+    latestReadingSnapshot = latestReading;
+
     // Update tank level
     const waterLevel = latestReading.water_level || 0;
     updateTankLevel(waterLevel);
@@ -901,8 +1189,255 @@ function updateDashboard(latestReading) {
     // Update sustainability impact section
     updateSustainabilityPanel(latestReading);
 
+    // Update AquaMind-inspired intelligence section
+    updateIntelligenceStudio(latestReading);
+
     // Update export stats
     updateExportStats();
+}
+
+function setupIntelligenceStudio() {
+    const runButton = document.getElementById('runImpactSimulationBtn');
+    const horizonInput = document.getElementById('impactHorizonDays');
+    const repairCostInput = document.getElementById('impactRepairCost');
+
+    if (runButton) {
+        runButton.addEventListener('click', async () => {
+            if (!latestReadingSnapshot) {
+                showAlert('No live reading available yet for simulation.', 'warning');
+                return;
+            }
+            try {
+                await runImpactSimulation(latestReadingSnapshot);
+                showAlert('Impact simulation updated', 'normal');
+            } catch (error) {
+                showAlert(`Impact simulation failed: ${error?.message || 'unknown error'}`, 'warning');
+            }
+        });
+    }
+
+    const rerun = () => {
+        if (latestReadingSnapshot) {
+            runImpactSimulation(latestReadingSnapshot).catch(() => {});
+        }
+    };
+
+    if (horizonInput) {
+        horizonInput.addEventListener('change', rerun);
+    }
+    if (repairCostInput) {
+        repairCostInput.addEventListener('change', rerun);
+    }
+}
+
+function updateIntelligenceStudio(latestReading) {
+    const risk = computePriorityProfile(latestReading);
+
+    syncApiDetect(latestReading, risk).catch(() => {});
+
+    const setText = (id, value) => {
+        const element = document.getElementById(id);
+        if (element) element.textContent = value;
+    };
+
+    const badge = document.getElementById('aiPriorityLevel');
+    if (badge) {
+        badge.textContent = risk.priorityLevel.toUpperCase();
+        badge.className = `intel-badge intel-badge-${risk.priorityLevel.toLowerCase()}`;
+    }
+
+    setText('aiPriorityScore', `${risk.priorityScore} / 100`);
+    setText('aiFailureProbability', `${(risk.failureProbability * 100).toFixed(1)}%`);
+    setText('aiImmediateAction', risk.immediateAction ? 'Yes' : 'No');
+    setText('aiRiskNarrative', risk.narrative);
+
+    const engineStatus = document.getElementById('intelEngineStatus');
+    if (engineStatus) {
+        engineStatus.textContent = `Engine: ${risk.priorityLevel} risk • score ${risk.priorityScore}`;
+    }
+
+    runImpactSimulation(latestReading, risk, true).catch(() => {});
+}
+
+async function syncApiDetect(latestReading, risk) {
+    const detectKey = `${latestReading?.timestamp || 'na'}|${risk.priorityScore}|${risk.priorityLevel}`;
+    if (localAdapterState.lastDetectKey === detectKey) return;
+    localAdapterState.lastDetectKey = detectKey;
+
+    const response = await getActiveApiAdapter().detect({
+        readings: [
+            {
+                pipe_id: 'esp32_pipe_live_01',
+                timestamp: latestReading?.timestamp || new Date().toISOString(),
+                flow_rate: Number(latestReading?.flow_rate_1 || 0),
+                pressure: Number(latestReading?.water_level || 0),
+                anomaly_label: risk.priorityScore >= 50 ? 'anomaly' : 'normal',
+                flow_rate_1: Number(latestReading?.flow_rate_1 || 0),
+                flow_rate_2: Number(latestReading?.flow_rate_2 || 0),
+                percentage_loss: Number(latestReading?.percentage_loss || 0),
+                humidity: Number(latestReading?.humidity || 0),
+                daily_total_liters: Number(latestReading?.daily_total_liters || 0)
+            }
+        ]
+    });
+
+    if (response?.status === 'success' && Array.isArray(response?.data?.alerts) && response.data.alerts.length) {
+        const maxStoredAlerts = 20;
+        localAdapterState.alerts = [...response.data.alerts, ...localAdapterState.alerts]
+            .slice(0, maxStoredAlerts);
+        refreshAlertFeedWithAdapter();
+    }
+}
+
+function refreshAlertFeedWithAdapter() {
+    const remoteAlerts = Array.isArray(dataStore.alerts) ? dataStore.alerts : [];
+    const localAlerts = Array.isArray(localAdapterState.alerts) ? localAdapterState.alerts : [];
+    const seen = new Set();
+    const merged = [...localAlerts, ...remoteAlerts].filter(alert => {
+        const key = getAlertKey(alert);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+    updateAlerts(merged);
+}
+
+function computePriorityProfile(latestReading) {
+    const flow1 = Number(latestReading?.flow_rate_1 || 0);
+    const flow2 = Number(latestReading?.flow_rate_2 || 0);
+    const percentageLoss = Math.max(0, Number(latestReading?.percentage_loss || 0));
+    const dailyTotal = Math.max(0, Number(latestReading?.daily_total_liters || 0));
+    const humidity = Number(latestReading?.humidity);
+
+    const leakRateLpm = Math.max(0, flow1 - flow2);
+    const imbalance = flow1 > 0 ? leakRateLpm / Math.max(flow1, 0.001) : 0;
+    const anomalyScore = Math.min(1, Math.max(0, (imbalance * 0.7) + ((percentageLoss / 100) * 0.3)));
+    const populationFactor = Math.min(1, dailyTotal / 6000);
+    const inferredRepairCost = 300 + (leakRateLpm * 95) + (percentageLoss * 8);
+    const repairCostFactor = Math.min(1, inferredRepairCost / 2000);
+
+    const priorityScoreRaw = (anomalyScore * 0.5) + (populationFactor * 0.3) + (repairCostFactor * 0.2);
+    const priorityScore = Math.max(1, Math.min(100, Math.round(priorityScoreRaw * 100)));
+
+    let humidityStress = 0;
+    if (Number.isFinite(humidity)) {
+        if (humidity < 30) humidityStress = Math.min(0.25, (30 - humidity) / 100);
+        if (humidity > 70) humidityStress = Math.min(0.25, (humidity - 70) / 100);
+    }
+
+    const failureProbability = Math.min(1, Math.max(0, (anomalyScore * 0.68) + (priorityScoreRaw * 0.22) + humidityStress));
+
+    let priorityLevel = 'Low';
+    if (priorityScore >= 75) priorityLevel = 'Critical';
+    else if (priorityScore >= 50) priorityLevel = 'High';
+    else if (priorityScore >= 25) priorityLevel = 'Medium';
+
+    const immediateAction = priorityScore >= 75 || failureProbability >= 0.75;
+
+    const narrative = immediateAction
+        ? `Rapid intervention advised. Leak rate ${leakRateLpm.toFixed(2)} L/min can escalate infrastructure stress.`
+        : `System currently stable. Monitor imbalance at ${leakRateLpm.toFixed(2)} L/min and trend progression.`;
+
+    return {
+        leakRateLpm,
+        inferredRepairCost,
+        priorityScore,
+        priorityLevel,
+        failureProbability,
+        immediateAction,
+        narrative
+    };
+}
+
+async function runImpactSimulation(latestReading, riskProfile = null, silent = false) {
+    const risk = riskProfile || computePriorityProfile(latestReading);
+    const horizonInput = document.getElementById('impactHorizonDays');
+    const repairCostInput = document.getElementById('impactRepairCost');
+
+    const horizonDays = Math.max(1, Math.min(365, Number(horizonInput?.value || 30)));
+    const repairCost = Math.max(1, Number(repairCostInput?.value || risk.inferredRepairCost));
+
+    if (repairCostInput && (!repairCostInput.value || Number(repairCostInput.value) <= 0)) {
+        repairCostInput.value = risk.inferredRepairCost.toFixed(0);
+    }
+
+    const whatIfResponse = await getActiveApiAdapter().whatif({
+        alert_id: localAdapterState.alerts[0]?.alert_id || 'esp32-live',
+        leak_rate: Math.max(0, risk.leakRateLpm),
+        population_affected: Math.max(1, Math.round(Number(latestReading?.daily_total_liters || 0) / 50)),
+        repair_cost: repairCost,
+        time_horizon_days: horizonDays
+    });
+
+    if (whatIfResponse?.status !== 'success' || !whatIfResponse?.data) {
+        if (!silent) showAlert(`Impact simulation failed (${API_ADAPTER_CONFIG.mode} mode)`, 'warning');
+        return;
+    }
+
+    const sim = whatIfResponse.data;
+    const ignoreLossLiters = Number(sim.ignore_scenario?.total_water_loss_liters || 0);
+    const ignoreFinancialCost = Number(sim.ignore_scenario?.financial_cost_usd || 0);
+    const repairPreventedLiters = Number(sim.repair_scenario?.water_loss_prevented_liters || 0);
+    const savingsUsd = Number(sim.savings_usd || 0);
+
+    const setText = (id, value) => {
+        const element = document.getElementById(id);
+        if (element) element.textContent = value;
+    };
+
+    setText('simIgnoreLoss', `${ignoreLossLiters.toFixed(0)} L`);
+    setText('simIgnoreCost', `$${ignoreFinancialCost.toFixed(2)}`);
+    setText('simRepairPrevented', `${repairPreventedLiters.toFixed(0)} L`);
+    setText('simSavings', `$${savingsUsd.toFixed(2)}`);
+
+    const explainResponse = await getActiveApiAdapter().explain({
+        alert_id: sim.alert_id,
+        simulation_id: sim.simulation_id,
+        pipe_id: 'esp32_pipe_live_01',
+        loss_rate: Math.max(0, risk.leakRateLpm),
+        population_affected: Math.max(1, Math.round(Number(latestReading?.daily_total_liters || 0) / 50)),
+        repair_cost: repairCost,
+        time_horizon_days: horizonDays,
+        simulation_result: sim,
+        reading: latestReading
+    });
+
+    const recommendation = buildRecommendationText(risk, savingsUsd, ignoreLossLiters, horizonDays, repairCost, explainResponse?.data);
+    setText('aiRecommendationText', recommendation.primary);
+
+    const insightsList = document.getElementById('aiInsightsList');
+    if (insightsList) {
+        insightsList.innerHTML = '';
+        recommendation.insights.forEach(insight => {
+            const item = document.createElement('li');
+            item.textContent = insight;
+            insightsList.appendChild(item);
+        });
+    }
+
+    if (!silent && repairCostInput) {
+        repairCostInput.value = repairCost.toFixed(0);
+    }
+}
+
+function buildRecommendationText(risk, savingsUsd, ignoreLossLiters, horizonDays, repairCost, explainData = null) {
+    const shouldRepair = savingsUsd > 0 || risk.immediateAction;
+    const action = explainData?.recommended_action || (shouldRepair ? 'Repair immediately' : 'Monitor and schedule maintenance');
+
+    const primary = shouldRepair
+        ? `${action}: estimated avoidable loss is ${ignoreLossLiters.toFixed(0)} L over ${horizonDays} days, with net savings around $${Math.max(0, savingsUsd).toFixed(2)}.`
+        : `${action}: projected financial impact remains below repair cost ($${repairCost.toFixed(2)}), but continue close monitoring.`;
+
+    const insights = [
+        `Priority ${risk.priorityLevel} (${risk.priorityScore}/100) with ${(risk.failureProbability * 100).toFixed(1)}% failure probability estimate.`,
+        `Current leak imbalance is ${risk.leakRateLpm.toFixed(2)} L/min between inlet and outlet flow.`,
+        explainData?.urgency_rationale || 'Local recommendation engine generated this advisory without requiring cloud AI services.',
+        shouldRepair
+            ? 'Recommendation engine flags immediate intervention as the sustainable option.'
+            : 'Recommendation engine suggests staged maintenance and trend watch to avoid over-spend.'
+    ];
+
+    return { primary, insights };
 }
 
 function updateSustainabilityPanel(latestReading) {

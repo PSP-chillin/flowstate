@@ -140,6 +140,77 @@
             </div>
         </section>
 
+        <section class="card intelligence-section">
+            <div class="intelligence-head">
+                <div>
+                    <p class="intelligence-kicker">AquaMind Feature Pack</p>
+                    <h2>🧠 Impact Intelligence Studio</h2>
+                    <p>Priority scoring, what-if impact simulation, and recommendation logic tuned for your live ESP32 telemetry.</p>
+                </div>
+                <div class="intelligence-status" id="intelEngineStatus">Engine: Waiting for live reading</div>
+            </div>
+
+            <div class="intelligence-grid">
+                <article class="intel-card">
+                    <h3>Priority & Failure Risk</h3>
+                    <div class="intel-risk-row">
+                        <span class="intel-badge intel-badge-muted" id="aiPriorityLevel">MEDIUM</span>
+                        <span class="intel-score" id="aiPriorityScore">0 / 100</span>
+                    </div>
+                    <div class="intel-metric">
+                        <span>Failure Probability (7d)</span>
+                        <strong id="aiFailureProbability">0.0%</strong>
+                    </div>
+                    <div class="intel-metric">
+                        <span>Immediate Action</span>
+                        <strong id="aiImmediateAction">No</strong>
+                    </div>
+                    <p class="intel-note" id="aiRiskNarrative">Collecting live flow imbalance to calculate risk.</p>
+                </article>
+
+                <article class="intel-card">
+                    <h3>What-If Impact Simulator</h3>
+                    <div class="intel-controls">
+                        <label>
+                            Horizon (days)
+                            <input id="impactHorizonDays" type="number" min="1" max="365" value="30">
+                        </label>
+                        <label>
+                            Repair Cost (USD)
+                            <input id="impactRepairCost" type="number" min="1" step="10" value="800">
+                        </label>
+                        <button class="btn intel-run-btn" id="runImpactSimulationBtn">Analyze Impact</button>
+                    </div>
+                    <div class="intel-sim-grid">
+                        <div>
+                            <span>Ignore: Water Loss</span>
+                            <strong id="simIgnoreLoss">0 L</strong>
+                        </div>
+                        <div>
+                            <span>Ignore: Financial Cost</span>
+                            <strong id="simIgnoreCost">$0.00</strong>
+                        </div>
+                        <div>
+                            <span>Repair: Prevented Water</span>
+                            <strong id="simRepairPrevented">0 L</strong>
+                        </div>
+                        <div>
+                            <span>Projected Savings</span>
+                            <strong id="simSavings">$0.00</strong>
+                        </div>
+                    </div>
+                </article>
+
+                <article class="intel-card">
+                    <h3>Recommendation Engine</h3>
+                    <p class="intel-recommendation" id="aiRecommendationText">No recommendation yet. Awaiting simulation output.</p>
+                    <ul class="intel-insights" id="aiInsightsList">
+                        <li>Live insight feed will appear here.</li>
+                    </ul>
+                </article>
+            </div>
+        </section>
+
         <!-- Main Dashboard Grid -->
         <div class="dashboard-grid">
             
@@ -473,6 +544,15 @@
     <footer class="footer">
         <p>&copy; 2026 FlowState | Real-time Leak Detection & Analytics</p>
     </footer>
+
+    <div id="adapterStatusBadge" class="adapter-status-badge" aria-live="polite" aria-atomic="true">
+        <div class="adapter-status-top">
+            <span class="adapter-status-mode" id="adapterModeLabel">LOCAL</span>
+            <span class="adapter-status-dot adapter-health-checking" id="adapterHealthDot" aria-hidden="true"></span>
+            <span class="adapter-status-health" id="adapterHealthLabel">Checking...</span>
+        </div>
+        <div class="adapter-status-url" id="adapterUrlLabel">local://browser</div>
+    </div>
 
     <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
 
