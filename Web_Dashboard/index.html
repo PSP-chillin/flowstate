@@ -4,12 +4,19 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Water Leak Detection Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="assets/style.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.5.0/dist/umd/supabase.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.2/mqttws31.js"></script>
 </head>
 <body>
+    <div class="bg-orb bg-orb-one"></div>
+    <div class="bg-orb bg-orb-two"></div>
+    <div class="bg-grid"></div>
+
     <!-- Animated Water Background -->
     <div class="water-background">
         <svg class="waves" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
@@ -30,13 +37,37 @@
         <!-- Header -->
         <header class="header">
             <div class="header-content">
-                <h1>💧 Water Leak Detection System</h1>
+                <div class="header-title-wrap">
+                    <p class="eyebrow">Smart Utilities Control Center</p>
+                    <h1>Water Intelligence Dashboard</h1>
+                    <p class="header-subtitle">Live flow, leak risk, humidity comfort, and infrastructure health in one place.</p>
+                </div>
                 <div class="header-status">
+                    <div class="status-badge" id="systemStatus"><span class="status-dot offline"></span>Offline</div>
+                    <label class="critical-mobile-toggle" for="mobileCriticalOnly">
+                        <input type="checkbox" id="mobileCriticalOnly">
+                        <span>Critical-only mobile</span>
+                    </label>
                     <button id="themeToggle" class="theme-toggle">🌙 Dark</button>
                     <div class="last-update" id="lastUpdate">Last Update: --</div>
                 </div>
             </div>
         </header>
+
+        <section class="pulse-strip">
+            <div class="pulse-item">
+                <span class="pulse-label">Anomaly Model</span>
+                <span class="pulse-value" id="anomalyStatus">Learning</span>
+            </div>
+            <div class="pulse-item">
+                <span class="pulse-label">Sync Mode</span>
+                <span class="pulse-value">Realtime + Polling Fallback</span>
+            </div>
+            <div class="pulse-item">
+                <span class="pulse-label">Window</span>
+                <span class="pulse-value">2 AM - 5 AM leak watch active</span>
+            </div>
+        </section>
 
         <!-- Main Dashboard Grid -->
         <div class="dashboard-grid">
@@ -214,6 +245,20 @@
                 <!-- Alerts Section -->
                 <section class="card alerts-section">
                     <h2>🔔 Recent Alerts</h2>
+                    <div class="alerts-toolbar">
+                        <div class="alerts-tabs" id="alertsTabs">
+                            <button class="alerts-tab active" data-severity="all">All <span id="countAll">0</span></button>
+                            <button class="alerts-tab" data-severity="critical">Critical <span id="countCritical">0</span></button>
+                            <button class="alerts-tab" data-severity="warning">Warning <span id="countWarning">0</span></button>
+                        </div>
+                        <div class="alerts-ack-tabs" id="alertsAckTabs">
+                            <button class="alerts-ack-tab active" data-ack="open">Open</button>
+                            <button class="alerts-ack-tab" data-ack="acknowledged">Acknowledged</button>
+                            <button class="alerts-ack-tab" data-ack="all">All states</button>
+                        </div>
+                        <div class="alerts-ack-summary" id="ackSummary">0 unacknowledged</div>
+                        <input type="search" id="alertSearch" class="alerts-search" placeholder="Search alerts..." aria-label="Search alerts">
+                    </div>
                     <div class="alerts-container" id="alertsContainer">
                         <div class="alert-item" style="color: #666;">
                             No alerts yet
@@ -230,23 +275,63 @@
             <h2>📊 Analytics & Trends</h2>
             <div class="analytics-grid">
                 <div class="chart-container">
-                    <h3>Flow Rate Trend (Last 1 Hour)</h3>
+                    <div class="chart-head">
+                        <h3 data-chart-title="flow">Flow Rate Trend (1h)</h3>
+                        <div class="timeframe-tabs" data-chart="flow">
+                            <button class="timeframe-tab" data-range="15m">15m</button>
+                            <button class="timeframe-tab active" data-range="1h">1h</button>
+                            <button class="timeframe-tab" data-range="6h">6h</button>
+                            <button class="timeframe-tab" data-range="24h">24h</button>
+                        </div>
+                    </div>
                     <canvas id="flowChart"></canvas>
                 </div>
                 <div class="chart-container">
-                    <h3>Accumulated Volume</h3>
+                    <div class="chart-head">
+                        <h3 data-chart-title="volume">Accumulated Volume (1h)</h3>
+                        <div class="timeframe-tabs" data-chart="volume">
+                            <button class="timeframe-tab" data-range="15m">15m</button>
+                            <button class="timeframe-tab active" data-range="1h">1h</button>
+                            <button class="timeframe-tab" data-range="6h">6h</button>
+                            <button class="timeframe-tab" data-range="24h">24h</button>
+                        </div>
+                    </div>
                     <canvas id="volumeChart"></canvas>
                 </div>
                 <div class="chart-container">
-                    <h3>Hourly Usage Pattern</h3>
+                    <div class="chart-head">
+                        <h3 data-chart-title="hourly">Hourly Usage Pattern (1h)</h3>
+                        <div class="timeframe-tabs" data-chart="hourly">
+                            <button class="timeframe-tab" data-range="15m">15m</button>
+                            <button class="timeframe-tab active" data-range="1h">1h</button>
+                            <button class="timeframe-tab" data-range="6h">6h</button>
+                            <button class="timeframe-tab" data-range="24h">24h</button>
+                        </div>
+                    </div>
                     <canvas id="hourlyChart"></canvas>
                 </div>
                 <div class="chart-container">
-                    <h3>Loss Percentage Trend</h3>
+                    <div class="chart-head">
+                        <h3 data-chart-title="loss">Loss Percentage Trend (1h)</h3>
+                        <div class="timeframe-tabs" data-chart="loss">
+                            <button class="timeframe-tab" data-range="15m">15m</button>
+                            <button class="timeframe-tab active" data-range="1h">1h</button>
+                            <button class="timeframe-tab" data-range="6h">6h</button>
+                            <button class="timeframe-tab" data-range="24h">24h</button>
+                        </div>
+                    </div>
                     <canvas id="lossChart"></canvas>
                 </div>
                 <div class="chart-container">
-                    <h3>Humidity Trend</h3>
+                    <div class="chart-head">
+                        <h3 data-chart-title="humidity">Humidity Trend (1h)</h3>
+                        <div class="timeframe-tabs" data-chart="humidity">
+                            <button class="timeframe-tab" data-range="15m">15m</button>
+                            <button class="timeframe-tab active" data-range="1h">1h</button>
+                            <button class="timeframe-tab" data-range="6h">6h</button>
+                            <button class="timeframe-tab" data-range="24h">24h</button>
+                        </div>
+                    </div>
                     <canvas id="humidityChart"></canvas>
                 </div>
             </div>
@@ -300,6 +385,8 @@
     <footer class="footer">
         <p>&copy; 2026 Smart Water Monitoring System | Real-time Leak Detection & Analytics</p>
     </footer>
+
+    <div id="toastHost" class="toast-host" aria-live="polite" aria-atomic="true"></div>
 
     <script src="assets/env.js"></script>
     <script src="assets/script.js"></script>

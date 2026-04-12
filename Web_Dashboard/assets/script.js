@@ -9,7 +9,8 @@ const CONFIG = {
     normalThreshold: 5,
     warningThreshold: 15,
     costPerLiter: 0.05,
-    chartPointsLimit: 60 // Last 60 data points
+    chartPointsLimit: 60, // Last 60 data points
+    maxReadingsFetch: 1440
 };
 
 
@@ -19,6 +20,18 @@ let isConfigured = false;
 let readingsSubscription = null;
 let alertsSubscription = null;
 let isDarkMode = false;
+let alertFilterSeverity = 'all';
+let alertSearchTerm = '';
+let alertAckFilter = 'open';
+let mobileCriticalOnly = false;
+const chartTimeframes = {
+    flow: '1h',
+    volume: '1h',
+    hourly: '1h',
+    loss: '1h',
+    humidity: '1h'
+};
+const acknowledgedAlertKeys = new Set(JSON.parse(localStorage.getItem('acknowledgedAlerts') || '[]'));
 
 // Data storage
 const dataStore = {
@@ -37,13 +50,420 @@ let humidityChart = null;
 // ============== INITIALIZATION ==============
 document.addEventListener('DOMContentLoaded', function() {
     console.log('Dashboard initialized');
+    initializeRevealAnimations();
+    setupAlertsUI();
+    setupAlertAcknowledgementUI();
+    setupChartTimeframeControls();
+    setupTimeframeSparklineUI();
     loadTheme();
     setupThemeToggle();
+    setupMobileCriticalMode();
     loadConfiguration();
     initSupabase(SUPABASE_CONFIG.url, SUPABASE_CONFIG.key);
     initializeCharts();
+    refreshChartTitles();
     startMonitoring();
 });
+
+function timeframeToMs(range) {
+    const mapping = {
+        '15m': 15 * 60 * 1000,
+        '1h': 60 * 60 * 1000,
+        '6h': 6 * 60 * 60 * 1000,
+        '24h': 24 * 60 * 60 * 1000
+    };
+    return mapping[range] || mapping['1h'];
+}
+
+function getPointsLimitForRange(range) {
+    const mapping = {
+        '15m': 45,
+        '1h': 90,
+        '6h': 180,
+        '24h': 280
+    };
+    return mapping[range] || 90;
+}
+
+function getFilteredReadings(range) {
+    const readings = Array.isArray(dataStore.readings) ? dataStore.readings : [];
+    if (readings.length === 0) return [];
+
+    const now = Date.now();
+    const threshold = now - timeframeToMs(range);
+    const withinRange = readings.filter(r => new Date(r.timestamp).getTime() >= threshold);
+    const source = withinRange.length > 0 ? withinRange : readings;
+    const pointLimit = getPointsLimitForRange(range);
+
+    if (source.length <= pointLimit) {
+        return source;
+    }
+
+    const sampled = [];
+    const stride = Math.ceil(source.length / pointLimit);
+    for (let index = 0; index < source.length; index += stride) {
+        sampled.push(source[index]);
+    }
+
+    if (sampled[sampled.length - 1] !== source[source.length - 1]) {
+        sampled.push(source[source.length - 1]);
+    }
+
+    return sampled;
+}
+
+function setupChartTimeframeControls() {
+    const controls = document.querySelectorAll('.timeframe-tabs');
+    controls.forEach(group => {
+        const chartKey = group.dataset.chart;
+        const buttons = group.querySelectorAll('.timeframe-tab');
+
+        buttons.forEach(button => {
+            button.addEventListener('click', () => {
+                const selectedRange = button.dataset.range || '1h';
+                chartTimeframes[chartKey] = selectedRange;
+                buttons.forEach(btn => btn.classList.toggle('active', btn === button));
+                refreshChartTitles();
+                updateCharts();
+            });
+        });
+    });
+}
+
+function refreshChartTitles() {
+    const chartTitles = document.querySelectorAll('[data-chart-title]');
+    chartTitles.forEach(title => {
+        const chartKey = title.dataset.chartTitle;
+        const selectedRange = chartTimeframes[chartKey] || '1h';
+        const map = {
+            flow: 'Flow Rate Trend',
+            volume: 'Accumulated Volume',
+            hourly: 'Hourly Usage Pattern',
+            loss: 'Loss Percentage Trend',
+            humidity: 'Humidity Trend'
+        };
+        title.textContent = `${map[chartKey] || 'Trend'} (${selectedRange})`;
+    });
+}
+
+function getAlertKey(alert) {
+    if (alert?.id !== undefined && alert?.id !== null) {
+        return `id:${alert.id}`;
+    }
+    return `${alert?.timestamp || 'na'}|${alert?.alert_type || 'alert'}|${alert?.message || ''}`;
+}
+
+function saveAcknowledgedAlerts() {
+    localStorage.setItem('acknowledgedAlerts', JSON.stringify(Array.from(acknowledgedAlertKeys)));
+}
+
+function setupAlertAcknowledgementUI() {
+    const container = document.getElementById('alertsContainer');
+    if (!container) return;
+
+    container.addEventListener('click', (event) => {
+        const button = event.target.closest('.ack-btn');
+        if (!button) return;
+
+        const alertKey = button.dataset.alertKey;
+        if (!alertKey) return;
+
+        if (acknowledgedAlertKeys.has(alertKey)) {
+            acknowledgedAlertKeys.delete(alertKey);
+            showAlert('Alert moved back to open', 'warning');
+        } else {
+            acknowledgedAlertKeys.add(alertKey);
+            showAlert('Alert acknowledged', 'normal');
+        }
+
+        saveAcknowledgedAlerts();
+        updateAlerts(dataStore.alerts || []);
+    });
+}
+
+function setupMobileCriticalMode() {
+    const switchInput = document.getElementById('mobileCriticalOnly');
+    if (!switchInput) return;
+
+    mobileCriticalOnly = localStorage.getItem('mobileCriticalOnly') === 'true';
+    switchInput.checked = mobileCriticalOnly;
+    applyMobileCriticalMode();
+
+    switchInput.addEventListener('change', () => {
+        mobileCriticalOnly = switchInput.checked;
+        localStorage.setItem('mobileCriticalOnly', String(mobileCriticalOnly));
+        applyMobileCriticalMode();
+        updateAlerts(dataStore.alerts || []);
+    });
+}
+
+function applyMobileCriticalMode() {
+    const shouldApply = mobileCriticalOnly && window.matchMedia('(max-width: 768px)').matches;
+    document.body.classList.toggle('mobile-critical-mode', shouldApply);
+}
+
+function getChartTheme() {
+    if (isDarkMode) {
+        return {
+            text: '#d2e5ef',
+            grid: 'rgba(174, 209, 224, 0.14)',
+            flow1Line: '#5bb9ff',
+            flow1Fill: 'rgba(91, 185, 255, 0.16)',
+            flow2Line: '#48d798',
+            flow2Fill: 'rgba(72, 215, 152, 0.16)',
+            vol1: 'rgba(91, 185, 255, 0.78)',
+            vol2: 'rgba(72, 215, 152, 0.78)',
+            hourly: 'rgba(245, 173, 63, 0.82)',
+            lossLine: '#ff7c73',
+            lossFill: 'rgba(255, 124, 115, 0.18)',
+            humidityLine: '#54d0f3',
+            humidityFill: 'rgba(84, 208, 243, 0.2)'
+        };
+    }
+
+    return {
+        text: '#264252',
+        grid: 'rgba(38, 66, 82, 0.12)',
+        flow1Line: '#0f87c8',
+        flow1Fill: 'rgba(15, 135, 200, 0.14)',
+        flow2Line: '#0d9f6b',
+        flow2Fill: 'rgba(13, 159, 107, 0.14)',
+        vol1: 'rgba(15, 135, 200, 0.72)',
+        vol2: 'rgba(13, 159, 107, 0.72)',
+        hourly: 'rgba(240, 153, 30, 0.76)',
+        lossLine: '#d4534b',
+        lossFill: 'rgba(212, 83, 75, 0.16)',
+        humidityLine: '#148eb2',
+        humidityFill: 'rgba(20, 142, 178, 0.18)'
+    };
+}
+
+function createChartOptions(theme) {
+    return {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+            legend: {
+                display: true,
+                position: 'top',
+                labels: {
+                    color: theme.text,
+                    boxWidth: 12,
+                    usePointStyle: true,
+                    pointStyle: 'circle'
+                }
+            }
+        },
+        scales: {
+            x: {
+                ticks: { color: theme.text },
+                grid: { color: theme.grid }
+            },
+            y: {
+                beginAtZero: true,
+                ticks: { color: theme.text },
+                grid: { color: theme.grid }
+            }
+        }
+    };
+}
+
+function applyChartTheme() {
+    const theme = getChartTheme();
+    const chartOptions = createChartOptions(theme);
+
+    if (flowChart) {
+        flowChart.data.datasets[0].borderColor = theme.flow1Line;
+        flowChart.data.datasets[0].backgroundColor = theme.flow1Fill;
+        flowChart.data.datasets[1].borderColor = theme.flow2Line;
+        flowChart.data.datasets[1].backgroundColor = theme.flow2Fill;
+        flowChart.options = { ...chartOptions };
+        flowChart.update('none');
+    }
+
+    if (volumeChart) {
+        volumeChart.data.datasets[0].backgroundColor = theme.vol1;
+        volumeChart.data.datasets[1].backgroundColor = theme.vol2;
+        volumeChart.options = { ...chartOptions };
+        volumeChart.update('none');
+    }
+
+    if (hourlyChart) {
+        hourlyChart.data.datasets[0].backgroundColor = theme.hourly;
+        hourlyChart.options = { ...chartOptions };
+        hourlyChart.update('none');
+    }
+
+    if (lossChart) {
+        lossChart.data.datasets[0].borderColor = theme.lossLine;
+        lossChart.data.datasets[0].backgroundColor = theme.lossFill;
+        lossChart.options = { ...chartOptions };
+        lossChart.update('none');
+    }
+
+    if (humidityChart) {
+        humidityChart.data.datasets[0].borderColor = theme.humidityLine;
+        humidityChart.data.datasets[0].backgroundColor = theme.humidityFill;
+        humidityChart.options = {
+            ...chartOptions,
+            scales: {
+                ...chartOptions.scales,
+                y: {
+                    ...chartOptions.scales.y,
+                    min: 0,
+                    max: 100,
+                    ticks: {
+                        ...chartOptions.scales.y.ticks,
+                        callback: value => `${value}%`
+                    }
+                }
+            }
+        };
+        humidityChart.update('none');
+    }
+}
+
+function setupAlertsUI() {
+    const tabs = document.querySelectorAll('.alerts-tab');
+    const ackTabs = document.querySelectorAll('.alerts-ack-tab');
+    const searchInput = document.getElementById('alertSearch');
+
+    tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            alertFilterSeverity = tab.dataset.severity || 'all';
+            tabs.forEach(btn => btn.classList.toggle('active', btn === tab));
+            updateAlerts(dataStore.alerts || []);
+        });
+    });
+
+    if (searchInput) {
+        searchInput.addEventListener('input', (event) => {
+            alertSearchTerm = (event.target.value || '').trim().toLowerCase();
+            updateAlerts(dataStore.alerts || []);
+        });
+    }
+
+    ackTabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            alertAckFilter = tab.dataset.ack || 'open';
+            ackTabs.forEach(btn => btn.classList.toggle('active', btn === tab));
+            updateAlerts(dataStore.alerts || []);
+        });
+    });
+}
+
+function setupTimeframeSparklineUI() {
+    const tabs = document.querySelectorAll('.timeframe-tab');
+    tabs.forEach(tab => {
+        if (tab.querySelector('.timeframe-sparkline')) return;
+
+        const label = tab.textContent.trim();
+        tab.textContent = '';
+
+        const labelSpan = document.createElement('span');
+        labelSpan.className = 'timeframe-label';
+        labelSpan.textContent = label;
+
+        const spark = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        spark.setAttribute('viewBox', '0 0 26 10');
+        spark.setAttribute('aria-hidden', 'true');
+        spark.classList.add('timeframe-sparkline');
+
+        const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+        polyline.classList.add('timeframe-sparkline-line');
+        polyline.setAttribute('points', '1,8 8,7 14,6 20,5 25,4');
+        spark.appendChild(polyline);
+
+        tab.appendChild(labelSpan);
+        tab.appendChild(spark);
+    });
+}
+
+function getChartMetricValue(chartKey, reading) {
+    switch (chartKey) {
+        case 'flow':
+            return Number(reading.flow_rate_1 || 0) + Number(reading.flow_rate_2 || 0);
+        case 'volume':
+            return Number(reading.flow_rate_1 || 0) * 0.1;
+        case 'hourly':
+            return Number(reading.flow_rate_1 || 0);
+        case 'loss':
+            return Number(reading.percentage_loss || 0);
+        case 'humidity': {
+            const humidity = Number(reading.humidity);
+            return Number.isFinite(humidity) ? humidity : 0;
+        }
+        default:
+            return 0;
+    }
+}
+
+function sampleValues(values, targetCount = 6) {
+    if (values.length <= targetCount) return values;
+    const sampled = [];
+    const stride = (values.length - 1) / (targetCount - 1);
+    for (let index = 0; index < targetCount; index++) {
+        sampled.push(values[Math.round(index * stride)]);
+    }
+    return sampled;
+}
+
+function valuesToSparklinePoints(values) {
+    if (!values.length) return '1,8 8,7 14,6 20,5 25,4';
+
+    const sampled = sampleValues(values, 6);
+    const min = Math.min(...sampled);
+    const max = Math.max(...sampled);
+    const span = Math.max(max - min, 0.0001);
+
+    return sampled.map((value, index) => {
+        const x = Math.round((index / Math.max(sampled.length - 1, 1)) * 24) + 1;
+        const normalized = (value - min) / span;
+        const y = Math.round((1 - normalized) * 7) + 1;
+        return `${x},${y}`;
+    }).join(' ');
+}
+
+function updateTimeframeSparklines() {
+    const groups = document.querySelectorAll('.timeframe-tabs');
+    groups.forEach(group => {
+        const chartKey = group.dataset.chart;
+        const tabs = group.querySelectorAll('.timeframe-tab');
+
+        tabs.forEach(tab => {
+            const range = tab.dataset.range || '1h';
+            const readings = getFilteredReadings(range);
+            const values = readings.map(reading => getChartMetricValue(chartKey, reading));
+            const points = valuesToSparklinePoints(values);
+            const line = tab.querySelector('.timeframe-sparkline-line');
+
+            if (line) {
+                line.setAttribute('points', points);
+            }
+        });
+    });
+}
+
+function initializeRevealAnimations() {
+    const revealTargets = document.querySelectorAll('.card, .chart-container');
+    if (revealTargets.length === 0) return;
+
+    revealTargets.forEach((el, index) => {
+        el.classList.add('card-reveal');
+        el.style.transition = `opacity 420ms ease ${Math.min(index * 40, 320)}ms, transform 420ms ease ${Math.min(index * 40, 320)}ms`;
+    });
+
+    const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                entry.target.classList.add('visible');
+                observer.unobserve(entry.target);
+            }
+        });
+    }, { threshold: 0.1 });
+
+    revealTargets.forEach(el => observer.observe(el));
+}
 
 // ============== THEME MANAGEMENT ==============
 function loadTheme() {
@@ -79,12 +499,13 @@ function applyTheme(dark) {
         document.documentElement.style.setProperty('--card-bg', 'rgba(255, 255, 255, 0.7)');
     }
     updateThemeButtonDisplay();
+    applyChartTheme();
 }
 
 function updateThemeButtonDisplay() {
     const themeToggle = document.getElementById('themeToggle');
     if (themeToggle) {
-        themeToggle.textContent = isDarkMode ? '🌙 Dark' : '☀️ Light';
+        themeToggle.textContent = isDarkMode ? 'Switch to Day Mode' : 'Switch to Night Mode';
     }
 }
 
@@ -264,7 +685,7 @@ async function fetchLatestData() {
             .from('water_readings')
             .select('*')
             .order('timestamp', { ascending: false })
-            .limit(60);
+            .limit(CONFIG.maxReadingsFetch);
 
         if (readingsError) {
             console.error('Error fetching readings:', readingsError);
@@ -491,26 +912,78 @@ function updateAlerts(alerts) {
         return;
     }
     
-    console.log('Updating alerts display with', alerts.length, 'alerts');
+    const alertList = Array.isArray(alerts) ? alerts : [];
+    console.log('Updating alerts display with', alertList.length, 'alerts');
+
+    const criticalCount = alertList.filter(a => (a.severity === 'critical' || a.severity === 'high')).length;
+    const warningCount = alertList.filter(a => (a.severity || '').toLowerCase() === 'warning' || (a.severity || '').toLowerCase() === 'medium').length;
+    const allCountElement = document.getElementById('countAll');
+    const criticalCountElement = document.getElementById('countCritical');
+    const warningCountElement = document.getElementById('countWarning');
+
+    if (allCountElement) allCountElement.textContent = String(alertList.length);
+    if (criticalCountElement) criticalCountElement.textContent = String(criticalCount);
+    if (warningCountElement) warningCountElement.textContent = String(warningCount);
+
+    const filteredAlerts = alertList.filter(alert => {
+        const normalizedSeverity = (alert.severity || '').toLowerCase();
+        const mappedSeverity = (normalizedSeverity === 'critical' || normalizedSeverity === 'high') ? 'critical' : 'warning';
+        const isAcknowledged = acknowledgedAlertKeys.has(getAlertKey(alert));
+
+        if (alertAckFilter === 'open' && isAcknowledged) {
+            return false;
+        }
+
+        if (alertAckFilter === 'acknowledged' && !isAcknowledged) {
+            return false;
+        }
+
+        if (mobileCriticalOnly && window.matchMedia('(max-width: 768px)').matches && mappedSeverity !== 'critical') {
+            return false;
+        }
+
+        if (alertFilterSeverity !== 'all' && mappedSeverity !== alertFilterSeverity) {
+            return false;
+        }
+
+        if (!alertSearchTerm) return true;
+
+        const haystack = `${alert.alert_type || ''} ${alert.message || ''} ${alert.severity || ''}`.toLowerCase();
+        return haystack.includes(alertSearchTerm);
+    });
     
-    if (!alerts || alerts.length === 0) {
+    if (filteredAlerts.length === 0) {
         container.innerHTML = '<div class="alert-item" style="color: #666;">No alerts yet</div>';
+        const ackSummary = document.getElementById('ackSummary');
+        if (ackSummary) ackSummary.textContent = '0 unacknowledged';
         return;
     }
 
+    const unacknowledgedCount = filteredAlerts.filter(alert => !acknowledgedAlertKeys.has(getAlertKey(alert))).length;
+    const acknowledgedCount = filteredAlerts.length - unacknowledgedCount;
+    const ackSummary = document.getElementById('ackSummary');
+    if (ackSummary) {
+        ackSummary.textContent = `${unacknowledgedCount} open • ${acknowledgedCount} acknowledged`;
+    }
+
     container.innerHTML = '';
-    alerts.slice(0, 5).forEach(alert => {
+    filteredAlerts.slice(0, 20).forEach(alert => {
         const alertDiv = document.createElement('div');
         
         // Determine severity class
         const severityClass = (alert.severity === 'critical' || alert.severity === 'high') ? 'critical' : 'warning';
-        alertDiv.className = `alert-item ${severityClass}`;
+        const alertKey = getAlertKey(alert);
+        const isAcknowledged = acknowledgedAlertKeys.has(alertKey);
+        alertDiv.className = `alert-item ${severityClass}${isAcknowledged ? ' acknowledged' : ''}`;
         
         const timestamp = new Date(alert.timestamp).toLocaleString();
         alertDiv.innerHTML = `
             <strong>${alert.alert_type || 'Alert'}</strong>
             <div>${alert.message}</div>
             <div class="alert-timestamp">${timestamp}</div>
+            <button class="ack-btn" data-alert-key="${alertKey}">
+                ${isAcknowledged ? 'Unacknowledge' : 'Acknowledge'}
+            </button>
         `;
         container.appendChild(alertDiv);
     });
@@ -577,21 +1050,8 @@ function closeValve() {
 
 // ============== CHARTS ==============
 function initializeCharts() {
-    const chartOptions = {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-            legend: {
-                display: true,
-                position: 'top'
-            }
-        },
-        scales: {
-            y: {
-                beginAtZero: true
-            }
-        }
-    };
+    const chartTheme = getChartTheme();
+    const chartOptions = createChartOptions(chartTheme);
 
     // Flow Rate Chart
     const flowCtx = document.getElementById('flowChart');
@@ -604,16 +1064,16 @@ function initializeCharts() {
                     {
                         label: 'Flow Rate 1 (L/min)',
                         data: [],
-                        borderColor: '#2196F3',
-                        backgroundColor: 'rgba(33, 150, 243, 0.1)',
+                        borderColor: chartTheme.flow1Line,
+                        backgroundColor: chartTheme.flow1Fill,
                         tension: 0.3,
                         fill: true
                     },
                     {
                         label: 'Flow Rate 2 (L/min)',
                         data: [],
-                        borderColor: '#4CAF50',
-                        backgroundColor: 'rgba(76, 175, 80, 0.1)',
+                        borderColor: chartTheme.flow2Line,
+                        backgroundColor: chartTheme.flow2Fill,
                         tension: 0.3,
                         fill: true
                     }
@@ -634,12 +1094,12 @@ function initializeCharts() {
                     {
                         label: 'Volume 1 (L)',
                         data: [],
-                        backgroundColor: '#2196F3'
+                        backgroundColor: chartTheme.vol1
                     },
                     {
                         label: 'Volume 2 (L)',
                         data: [],
-                        backgroundColor: '#4CAF50'
+                        backgroundColor: chartTheme.vol2
                     }
                 ]
             },
@@ -658,7 +1118,7 @@ function initializeCharts() {
                     {
                         label: 'Hourly Usage (L)',
                         data: Array(24).fill(0),
-                        backgroundColor: '#FF9800'
+                        backgroundColor: chartTheme.hourly
                     }
                 ]
             },
@@ -677,8 +1137,8 @@ function initializeCharts() {
                     {
                         label: 'Loss %',
                         data: [],
-                        borderColor: '#F44336',
-                        backgroundColor: 'rgba(244, 67, 54, 0.1)',
+                        borderColor: chartTheme.lossLine,
+                        backgroundColor: chartTheme.lossFill,
                         tension: 0.3,
                         fill: true
                     }
@@ -699,8 +1159,8 @@ function initializeCharts() {
                     {
                         label: 'Humidity (%)',
                         data: [],
-                        borderColor: '#00ACC1',
-                        backgroundColor: 'rgba(0, 172, 193, 0.12)',
+                        borderColor: chartTheme.humidityLine,
+                        backgroundColor: chartTheme.humidityFill,
                         tension: 0.35,
                         fill: true
                     }
@@ -721,34 +1181,40 @@ function initializeCharts() {
             }
         });
     }
+
+    applyChartTheme();
 }
 
 function updateCharts() {
     if (dataStore.readings.length === 0) return;
 
-    const recentReadings = dataStore.readings.slice(-CONFIG.chartPointsLimit);
+    const flowReadings = getFilteredReadings(chartTimeframes.flow);
+    const volumeReadings = getFilteredReadings(chartTimeframes.volume);
+    const lossReadings = getFilteredReadings(chartTimeframes.loss);
+    const humidityReadings = getFilteredReadings(chartTimeframes.humidity);
+    const hourlyReadings = getFilteredReadings(chartTimeframes.hourly);
 
     // Update Flow Chart
     if (flowChart) {
-        flowChart.data.labels = recentReadings.map((r, i) => {
+        flowChart.data.labels = flowReadings.map(r => {
             const date = new Date(r.timestamp);
             return date.toLocaleTimeString();
         });
-        flowChart.data.datasets[0].data = recentReadings.map(r => r.flow_rate_1 || 0);
-        flowChart.data.datasets[1].data = recentReadings.map(r => r.flow_rate_2 || 0);
+        flowChart.data.datasets[0].data = flowReadings.map(r => r.flow_rate_1 || 0);
+        flowChart.data.datasets[1].data = flowReadings.map(r => r.flow_rate_2 || 0);
         flowChart.update();
     }
 
     // Update Volume Chart (accumulated)
     if (volumeChart) {
-        volumeChart.data.labels = recentReadings.map((r, i) => {
+        volumeChart.data.labels = volumeReadings.map(r => {
             const date = new Date(r.timestamp);
             return date.toLocaleTimeString();
         });
-        volumeChart.data.datasets[0].data = recentReadings.map((r, i) => {
+        volumeChart.data.datasets[0].data = volumeReadings.map(r => {
             return (r.flow_rate_1 || 0) * 0.1; // Approximate volume
         });
-        volumeChart.data.datasets[1].data = recentReadings.map((r, i) => {
+        volumeChart.data.datasets[1].data = volumeReadings.map(r => {
             return (r.flow_rate_2 || 0) * 0.1;
         });
         volumeChart.update();
@@ -756,21 +1222,21 @@ function updateCharts() {
 
     // Update Loss Percentage Chart
     if (lossChart) {
-        lossChart.data.labels = recentReadings.map((r, i) => {
+        lossChart.data.labels = lossReadings.map(r => {
             const date = new Date(r.timestamp);
             return date.toLocaleTimeString();
         });
-        lossChart.data.datasets[0].data = recentReadings.map(r => r.percentage_loss || 0);
+        lossChart.data.datasets[0].data = lossReadings.map(r => r.percentage_loss || 0);
         lossChart.update();
     }
 
     // Update Humidity Chart
     if (humidityChart) {
-        humidityChart.data.labels = recentReadings.map(r => {
+        humidityChart.data.labels = humidityReadings.map(r => {
             const date = new Date(r.timestamp);
             return date.toLocaleTimeString();
         });
-        humidityChart.data.datasets[0].data = recentReadings.map(r => {
+        humidityChart.data.datasets[0].data = humidityReadings.map(r => {
             const humidity = Number(r.humidity);
             return Number.isFinite(humidity) ? humidity : null;
         });
@@ -782,7 +1248,7 @@ function updateCharts() {
         const hourlyData = Array(24).fill(0);
         const hourlyCount = Array(24).fill(0);
 
-        recentReadings.forEach(r => {
+        hourlyReadings.forEach(r => {
             const date = new Date(r.timestamp);
             const hour = date.getHours();
             hourlyData[hour] += (r.flow_rate_1 || 0) * 0.1;
@@ -799,12 +1265,29 @@ function updateCharts() {
         hourlyChart.data.datasets[0].data = hourlyData;
         hourlyChart.update();
     }
+
+    updateTimeframeSparklines();
 }
 
 // ============== UTILITY FUNCTIONS ==============
 function showAlert(message, type = 'normal') {
     console.log(`[${type.toUpperCase()}] ${message}`);
-    // You can enhance this with a toast notification library
+
+    const host = document.getElementById('toastHost');
+    if (!host) {
+        return;
+    }
+
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    host.appendChild(toast);
+
+    window.setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateY(8px)';
+        window.setTimeout(() => toast.remove(), 200);
+    }, 2800);
 }
 
 // ============== EXPORT & DOWNLOAD ==============
@@ -876,6 +1359,7 @@ function updateExportStats() {
 
 // ============== RESPONSIVE UPDATES ==============
 window.addEventListener('resize', function() {
+    applyMobileCriticalMode();
     if (flowChart) flowChart.resize();
     if (volumeChart) volumeChart.resize();
     if (hourlyChart) hourlyChart.resize();
