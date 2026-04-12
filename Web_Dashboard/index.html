@@ -196,6 +196,21 @@
                     </div>
                 </section>
 
+                <!-- Humidity Section -->
+                <section class="card humidity-section">
+                    <h2>🌫️ Ambient Humidity</h2>
+                    <div class="humidity-content">
+                        <div class="humidity-main">
+                            <span class="humidity-value" id="humidityValue">0.0%</span>
+                            <span class="humidity-trend" id="humidityTrend">Waiting for sensor data...</span>
+                        </div>
+                        <div class="humidity-meter">
+                            <div class="humidity-meter-fill" id="humidityMeterFill" style="width: 0%"></div>
+                        </div>
+                        <div class="humidity-comfort" id="humidityComfortBadge">NO DATA</div>
+                    </div>
+                </section>
+
                 <!-- Alerts Section -->
                 <section class="card alerts-section">
                     <h2>🔔 Recent Alerts</h2>
@@ -229,6 +244,10 @@
                 <div class="chart-container">
                     <h3>Loss Percentage Trend</h3>
                     <canvas id="lossChart"></canvas>
+                </div>
+                <div class="chart-container">
+                    <h3>Humidity Trend</h3>
+                    <canvas id="humidityChart"></canvas>
                 </div>
             </div>
         </section>

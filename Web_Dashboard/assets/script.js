@@ -32,6 +32,7 @@ let flowChart = null;
 let volumeChart = null;
 let hourlyChart = null;
 let lossChart = null;
+let humidityChart = null;
 
 // ============== INITIALIZATION ==============
 document.addEventListener('DOMContentLoaded', function() {
@@ -345,6 +346,9 @@ function updateDashboard(latestReading) {
         anomalyStatusElement.textContent = latestReading.anomaly_status || 'Learning';
     }
 
+    // Update humidity panel
+    updateHumidityDisplay(latestReading);
+
     // Update statistics
     const dailyTotal = (latestReading.daily_total_liters || 0).toFixed(2);
     document.getElementById('dailyTotal').textContent = dailyTotal + ' L';
@@ -362,6 +366,60 @@ function updateDashboard(latestReading) {
 
     // Update export stats
     updateExportStats();
+}
+
+function updateHumidityDisplay(latestReading) {
+    const humidityRaw = latestReading?.humidity;
+    const hasHumidity = humidityRaw !== null && humidityRaw !== undefined && Number.isFinite(Number(humidityRaw));
+    const humidity = hasHumidity ? Math.max(0, Math.min(100, Number(humidityRaw))) : null;
+
+    const humidityValue = document.getElementById('humidityValue');
+    const humidityMeterFill = document.getElementById('humidityMeterFill');
+    const humidityComfortBadge = document.getElementById('humidityComfortBadge');
+    const humidityTrend = document.getElementById('humidityTrend');
+
+    if (!humidityValue || !humidityMeterFill || !humidityComfortBadge || !humidityTrend) {
+        return;
+    }
+
+    if (humidity === null) {
+        humidityValue.textContent = 'N/A';
+        humidityMeterFill.style.width = '0%';
+        humidityComfortBadge.textContent = 'NO DATA';
+        humidityComfortBadge.className = 'humidity-comfort humidity-comfort-muted';
+        humidityTrend.textContent = 'Humidity column missing in latest row.';
+        return;
+    }
+
+    humidityValue.textContent = `${humidity.toFixed(1)}%`;
+    humidityMeterFill.style.width = `${humidity}%`;
+
+    let comfortText = 'COMFORT';
+    let comfortClass = 'humidity-comfort-good';
+
+    if (humidity < 30) {
+        comfortText = 'DRY AIR';
+        comfortClass = 'humidity-comfort-dry';
+    } else if (humidity > 70) {
+        comfortText = 'VERY HUMID';
+        comfortClass = 'humidity-comfort-wet';
+    }
+
+    humidityComfortBadge.textContent = comfortText;
+    humidityComfortBadge.className = `humidity-comfort ${comfortClass}`;
+
+    const recentWithHumidity = dataStore.readings
+        .slice(-2)
+        .filter(r => r.humidity !== null && r.humidity !== undefined && Number.isFinite(Number(r.humidity)));
+
+    if (recentWithHumidity.length >= 2) {
+        const previous = Number(recentWithHumidity[0].humidity);
+        const delta = humidity - previous;
+        const arrow = delta > 0.2 ? 'rising' : delta < -0.2 ? 'falling' : 'stable';
+        humidityTrend.textContent = `Indoor air is ${arrow} (${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%)`;
+    } else {
+        humidityTrend.textContent = 'Collecting humidity trend...';
+    }
 }
 
 function updateTankLevel(waterLevel) {
@@ -629,6 +687,40 @@ function initializeCharts() {
             options: chartOptions
         });
     }
+
+    // Humidity Chart
+    const humidityCtx = document.getElementById('humidityChart');
+    if (humidityCtx) {
+        humidityChart = new Chart(humidityCtx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'Humidity (%)',
+                        data: [],
+                        borderColor: '#00ACC1',
+                        backgroundColor: 'rgba(0, 172, 193, 0.12)',
+                        tension: 0.35,
+                        fill: true
+                    }
+                ]
+            },
+            options: {
+                ...chartOptions,
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        min: 0,
+                        max: 100,
+                        ticks: {
+                            callback: value => `${value}%`
+                        }
+                    }
+                }
+            }
+        });
+    }
 }
 
 function updateCharts() {
@@ -670,6 +762,19 @@ function updateCharts() {
         });
         lossChart.data.datasets[0].data = recentReadings.map(r => r.percentage_loss || 0);
         lossChart.update();
+    }
+
+    // Update Humidity Chart
+    if (humidityChart) {
+        humidityChart.data.labels = recentReadings.map(r => {
+            const date = new Date(r.timestamp);
+            return date.toLocaleTimeString();
+        });
+        humidityChart.data.datasets[0].data = recentReadings.map(r => {
+            const humidity = Number(r.humidity);
+            return Number.isFinite(humidity) ? humidity : null;
+        });
+        humidityChart.update();
     }
 
     // Update Hourly Chart (aggregate by hour)
@@ -775,6 +880,7 @@ window.addEventListener('resize', function() {
     if (volumeChart) volumeChart.resize();
     if (hourlyChart) hourlyChart.resize();
     if (lossChart) lossChart.resize();
+    if (humidityChart) humidityChart.resize();
 });
 
 // ============== KEYBOARD SHORTCUTS ==============

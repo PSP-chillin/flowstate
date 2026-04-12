@@ -43,6 +43,7 @@
 #include <time.h>
 #include <math.h>
 #include <ESP32Servo.h>
+#include <DHT.h>
 
 // ============== PIN CONFIGURATION ==============
 #define FLOW_SENSOR_1_PIN 19 // Flow sensor near tank (GPIO 19 - supports interrupts)
@@ -50,6 +51,8 @@
 #define WATER_LEVEL_PIN 33   // Water level sensor (GPIO 33, ADC)
 #define BUZZER_PIN 13        // Buzzer/alarm pin (GPIO 13 - standard I/O)
 #define SERVO_PIN 26         // Servo motor pin for valve control (GPIO 26)
+#define DHT_PIN 4            // DHT22 data pin (GPIO 4)
+#define DHT_TYPE DHT22
 
 // ============== PIPE SPECIFICATIONS ==============
 // Pipe diameter: 3/4 inch (19.05 mm)
@@ -77,6 +80,10 @@ const float TANK_HEIGHT_CM = 100.0;        // Tank height in cm
 // ============== NOISE FILTERING ==============
 const unsigned int FLOW_SENSOR_NOISE_THRESHOLD = 1; // Minimum pulses per second to register as flow (1 pulse = 0.133 L/min)
 const float FLOW_RATE_MIN_THRESHOLD = 0.05;         // Minimum L/min to consider as actual flow (very sensitive)
+
+// ============== HUMIDITY MONITORING ==============
+const float HUMIDITY_MIN_VALID = 0.0;
+const float HUMIDITY_MAX_VALID = 100.0;
 
 // ============== DETECTION THRESHOLDS ==============
 const float NORMAL_LOSS_THRESHOLD = 5.0;    // <5% normal loss
@@ -122,6 +129,7 @@ struct SystemState
   float current_flow_rate_2;
   float percentage_loss;
   float water_level_cm;
+  float humidity_percent;
   uint8_t valve_state; // 0 = CLOSED, 1 = OPEN
   String leak_status;  // "Normal", "Warning", "Critical"
   String anomaly_status;
@@ -142,6 +150,9 @@ RTC_DS3231 rtc;
 
 // Servo valve control
 Servo valveServo;
+
+// DHT22 sensor
+DHT dht(DHT_PIN, DHT_TYPE);
 
 // Buzzer state management - Morse code pattern (short-short-long)
 bool buzzer_active = false; // Whether buzzer should buzz
@@ -189,6 +200,7 @@ void setup()
 
   system_state.valve_state = 0;
   system_state.daily_total_ml = 0;
+  system_state.humidity_percent = 0;
   system_state.nighttime_flow_active = false;
   system_state.nighttime_accumulated_volume_liters = 0;
   system_state.nighttime_leak_status = "Normal";
@@ -201,6 +213,9 @@ void setup()
   valveServo.setPeriodHertz(50);
   valveServo.attach(SERVO_PIN, 500, 2400);
   valveServo.write(0);
+
+  // Initialize DHT22
+  dht.begin();
 
   // Initialize RTC
   if (!rtc.begin())
@@ -255,6 +270,9 @@ void setup()
   Serial.println("): Ready");
   Serial.print("Water Level (GPIO ");
   Serial.print(WATER_LEVEL_PIN);
+  Serial.println("): Ready");
+  Serial.print("DHT22 Humidity (GPIO ");
+  Serial.print(DHT_PIN);
   Serial.println("): Ready");
   Serial.print("Servo Valve (GPIO ");
   Serial.print(SERVO_PIN);
@@ -483,6 +501,17 @@ void read_sensors()
   // Read water level
   int adc_value = analogRead(WATER_LEVEL_PIN);
 
+  // Read humidity and keep last known value if sensor returns NAN intermittently.
+  float humidity = dht.readHumidity();
+  if (isfinite(humidity) && humidity >= HUMIDITY_MIN_VALID && humidity <= HUMIDITY_MAX_VALID)
+  {
+    system_state.humidity_percent = humidity;
+  }
+  else
+  {
+    Serial.println("[HUMIDITY] Invalid DHT22 reading, keeping previous value");
+  }
+
   // Debug: Print raw ADC value
   Serial.print("[WATER LEVEL] Raw ADC: ");
   Serial.print(adc_value);
@@ -514,7 +543,10 @@ void read_sensors()
   Serial.print(system_state.current_flow_rate_2, 2);
   Serial.print(" L/min | Level: ");
   Serial.print(system_state.water_level_cm, 1);
-  Serial.print(" cm | Valve: ");
+  Serial.print(" cm | Humidity: ");
+  Serial.print(system_state.humidity_percent, 1);
+  Serial.print(" %");
+  Serial.print(" | Valve: ");
   Serial.print(system_state.valve_state ? "OPEN" : "CLOSE");
   Serial.print(" | WiFi: ");
   Serial.println(WiFi.status() == WL_CONNECTED ? "OK" : "NO");
@@ -1050,6 +1082,7 @@ void send_data_to_supabase()
   float safe_flow_2 = isfinite(system_state.current_flow_rate_2) ? system_state.current_flow_rate_2 : 0.0;
   float safe_loss = isfinite(system_state.percentage_loss) ? system_state.percentage_loss : 0.0;
   float safe_level = isfinite(system_state.water_level_cm) ? system_state.water_level_cm : 0.0;
+  float safe_humidity = isfinite(system_state.humidity_percent) ? system_state.humidity_percent : 0.0;
 
   doc["timestamp"] = timestamp;
   doc["flow_rate_1"] = round(safe_flow_1 * 100.0) / 100.0;
@@ -1057,6 +1090,7 @@ void send_data_to_supabase()
   // percentage_loss is already 0-100, just send directly (don't multiply by 100 again)
   doc["percentage_loss"] = safe_loss;
   doc["water_level"] = round(safe_level * 100.0) / 100.0;
+  doc["humidity"] = round(safe_humidity * 100.0) / 100.0;
   doc["valve_state"] = system_state.valve_state;
   doc["leak_status"] = system_state.leak_status;
   doc["anomaly_status"] = system_state.anomaly_status;
@@ -1131,7 +1165,9 @@ void send_data_to_supabase()
     Serial.print(system_state.current_flow_rate_2, 2);
     Serial.print(" L/min | Level: ");
     Serial.print(system_state.water_level_cm, 1);
-    Serial.println(" cm");
+    Serial.print(" cm | Humidity: ");
+    Serial.print(system_state.humidity_percent, 1);
+    Serial.println(" %");
     Serial.println("=========================================\n");
   }
   else
@@ -1270,6 +1306,9 @@ void print_status()
   Serial.print("Water Level: ");
   Serial.print(system_state.water_level_cm, 1);
   Serial.println(" cm");
+  Serial.print("Humidity: ");
+  Serial.print(system_state.humidity_percent, 1);
+  Serial.println(" %");
   Serial.print("Loss %: ");
   Serial.print(system_state.percentage_loss, 1);
   Serial.println("%");

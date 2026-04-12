@@ -228,6 +228,7 @@ In Arduino IDE, go to Sketch → Include Library → Manage Libraries:
 - **ArduinoJson** v6.18+ (by Benoit Bleuze)
 - **RTClib** (by Adafruit)
 - **ESP32Servo** (by Kevin Harrington / John K. Bennett)
+- **DHT sensor library** (by Adafruit)
 - **ESP32 Core** v2.0+ (installed with board)
 
 ### Step 3: Configure ESP32 Code
@@ -978,6 +979,7 @@ curl -H "apikey: YOUR_KEY" \
 - ArduinoJson v6.18+
 - RTClib (Adafruit)
 - ESP32Servo
+- DHT sensor library (Adafruit)
 - WiFiClientSecure (HTTPS)
 
 ### Backend
